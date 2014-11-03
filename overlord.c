@@ -9,11 +9,11 @@ typedef struct {
     FILE *fd;
 } Command;
 
-int n = 0;
-Command *commands = NULL;
-char *line = NULL;
-size_t linecap = 0;
-ssize_t linelen = 0;
+int     n           = 0;
+Command *commands   = NULL;
+char    *line       = NULL;
+size_t  linecap     = 0;
+ssize_t linelen     = 0;
 
 int main () {
     // Read lines
