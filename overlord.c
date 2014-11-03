@@ -13,7 +13,7 @@ int main (int argc, char **argv) {
     char *line = NULL;
     size_t linecap = 0;
     ssize_t linelen;
-    while ((linelen = getline(&line, &linecap, stdin)) > 0) {
+    while ((linelen = getline(&line, &linecap, stdin)) != -1) {
         // TODO Trim whitespace
         // TODO Ignore empty lines
 
@@ -36,6 +36,10 @@ int main (int argc, char **argv) {
 
         fds[n-1] = fd;
     }
+    if (errno != 0) {
+        printf("overlord: %s\n", strerror(errno));
+        return 6;
+    }
 
     // Read output of commands
     fd_set set;
@@ -51,29 +55,26 @@ int main (int argc, char **argv) {
             return 3;
         }
 
-        for (int i = 0; i < n; ++i) {
-            if (FD_ISSET (fileno(fds[i]), &set)) {
-                linelen = getline(&line, &linecap, fds[i]);
-                if (linelen == -1) {
-                    if (errno != 0) {
-                        printf("overlord: %s\n", strerror(errno));
-                        return 4;
-                    }
-
-                    // EOF
-                    rc = pclose(fds[i]);
-                    if (rc == -1) {
-                        printf("overlord: %s\n", strerror(errno));
-                        return 5;
-                    }
-                    fds[i] = fds[--n];
-                    break;
+        for (int i = 0; i < n && FD_ISSET (fileno(fds[i]), &set); ++i) {
+            linelen = getline(&line, &linecap, fds[i]);
+            if (linelen == -1) {
+                if (errno != 0) {
+                    printf("overlord: %s\n", strerror(errno));
+                    return 4;
                 }
 
-                if (linelen > 0) {
-                    fwrite(line, linelen, 1, stdout);
+                // EOF
+                rc = pclose(fds[i]);
+                if (rc == -1) {
+                    printf("overlord: %s\n", strerror(errno));
+                    return 5;
                 }
+
+                fds[i] = fds[--n];
+                break;
             }
+
+            fwrite(line, linelen, 1, stdout);
         }
     }
 
