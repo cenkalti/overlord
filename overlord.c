@@ -4,15 +4,19 @@
 #include <unistd.h>
 #include <errno.h>
 
-int main (int argc, char **argv) {
-    int rc;
-    int n = 0;
-    FILE **fds;
+typedef struct {
+    char *line;
+    FILE *fd;
+} Command;
 
+int n = 0;
+Command *commands = NULL;
+char *line = NULL;
+size_t linecap = 0;
+ssize_t linelen = 0;
+
+int main () {
     // Read lines
-    char *line = NULL;
-    size_t linecap = 0;
-    ssize_t linelen;
     while ((linelen = getline(&line, &linecap, stdin)) != -1) {
         // TODO Trim whitespace
         // TODO Ignore empty lines
@@ -20,25 +24,32 @@ int main (int argc, char **argv) {
         // Ignore comments
         if (*line == '#') continue;
 
-        // Run command
-        FILE *fd;
-        fd = popen(line, "r");
-        if (fd == NULL) {
+        commands = realloc(commands, sizeof(Command) * ++n);
+        if (commands == NULL) {
             printf("overlord: %s\n", strerror(errno));
             return 1;
         }
 
-        fds = realloc(fds, sizeof(FILE*) * ++n);
-        if (fds == NULL) {
+        commands[n-1].line = malloc(linelen+1);
+        if (commands[n-1].line == NULL) {
             printf("overlord: %s\n", strerror(errno));
             return 2;
         }
 
-        fds[n-1] = fd;
+        strcpy(commands[n-1].line, line);
     }
     if (errno != 0) {
         printf("overlord: %s\n", strerror(errno));
-        return 6;
+        return 3;
+    }
+
+    // Run commands
+    for (int i = 0; i < n; ++i) {
+        commands[i].fd = popen(commands[i].line, "r");
+        if (commands[i].fd == NULL) {
+            printf("overlord: %s\n", strerror(errno));
+            return 4;
+        }
     }
 
     // Read output of commands
@@ -46,35 +57,43 @@ int main (int argc, char **argv) {
     while (n > 0) {
         FD_ZERO (&set);
         for (int i = 0; i < n; ++i) {
-            FD_SET (fileno(fds[i]), &set);
+            FD_SET (fileno(commands[i].fd), &set);
         }
 
-        rc = select(FD_SETSIZE, &set, NULL, NULL, NULL);
+        // Wait for IO
+        int rc = select(FD_SETSIZE, &set, NULL, NULL, NULL);
         if (rc == -1) {
             printf("overlord: %s\n", strerror(errno));
-            return 3;
+            return 5;
         }
 
-        for (int i = 0; i < n && FD_ISSET (fileno(fds[i]), &set); ++i) {
-            linelen = getline(&line, &linecap, fds[i]);
-            if (linelen == -1) {
-                if (errno != 0) {
-                    printf("overlord: %s\n", strerror(errno));
-                    return 4;
-                }
-
-                // EOF
-                rc = pclose(fds[i]);
-                if (rc == -1) {
-                    printf("overlord: %s\n", strerror(errno));
-                    return 5;
-                }
-
-                fds[i] = fds[--n];
-                break;
+        for (int i = 0; i < n && FD_ISSET (fileno(commands[i].fd), &set); ++i) {
+            linelen = getline(&line, &linecap, commands[i].fd);
+            if (linelen != -1) {
+                // Write output
+                fwrite(line, linelen, 1, stdout);
+                continue;
             }
 
-            fwrite(line, linelen, 1, stdout);
+            // EOF, check for error
+            if (errno != 0) {
+                printf("overlord: %s\n", strerror(errno));
+                return 6;
+            }
+
+            // Close old stream
+            rc = pclose(commands[i].fd);
+            if (rc == -1) {
+                printf("overlord: %s\n", strerror(errno));
+                return 7;
+            }
+
+            // Restart command
+            commands[i].fd = popen(commands[i].line, "r");
+            if (commands[i].fd == NULL) {
+                printf("overlord: %s\n", strerror(errno));
+                return 8;
+            }
         }
     }
 
