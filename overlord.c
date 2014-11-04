@@ -46,10 +46,7 @@ int main () {
     // Run commands
     for (int i = 0; i < n; ++i) {
         commands[i].fd = popen(commands[i].line, "r");
-        if (commands[i].fd == NULL) {
-            printf("overlord: %s\n", strerror(errno));
-            return 4;
-        }
+        if (commands[i].fd == NULL) return 4;
     }
 
     // Read output of commands
@@ -83,17 +80,11 @@ int main () {
 
             // Close old stream
             rc = pclose(commands[i].fd);
-            if (rc == -1) {
-                printf("overlord: %s\n", strerror(errno));
-                return 7;
-            }
+            if (rc == -1) return 7;
 
             // Restart command
             commands[i].fd = popen(commands[i].line, "r");
-            if (commands[i].fd == NULL) {
-                printf("overlord: %s\n", strerror(errno));
-                return 8;
-            }
+            if (commands[i].fd == NULL) return 8;
         }
     }
 
