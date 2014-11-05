@@ -6,6 +6,7 @@
 
 typedef struct {
     char *line;
+    int  pid;
     FILE *fd;
 } Command;
 
@@ -15,7 +16,32 @@ char    *line       = NULL;
 size_t  linecap     = 0;
 ssize_t linelen     = 0;
 
-int main () {
+int run_command(Command *cmd) {
+    FILE *fd;
+    int filedes[2], pid;
+
+    if (pipe(filedes) == -1) return -1;
+
+    switch (pid = fork()) {
+    case -1:
+        return -1;
+    case 0: // Child
+        dup2(filedes[1], STDOUT_FILENO);
+        close(filedes[1]);
+        close(filedes[0]);
+        execl("/bin/sh", "sh", "-c", cmd->line, NULL);
+        _exit(127);
+    }
+
+    // Parent
+    fd = fdopen(filedes[0], "r");
+    close(filedes[1]);
+    cmd->pid = pid;
+    cmd->fd = fd;
+    return 0;
+}
+
+int main() {
     // Read lines
     while ((linelen = getline(&line, &linecap, stdin)) != -1) {
         // TODO Trim whitespace
@@ -45,8 +71,10 @@ int main () {
 
     // Run commands
     for (int i = 0; i < n; ++i) {
-        commands[i].fd = popen(commands[i].line, "r");
-        if (commands[i].fd == NULL) return 4;
+        if (run_command(&commands[i]) == -1) {
+            printf("overlord: %s\n", strerror(errno));
+            return 4;
+        }
     }
 
     // Read output of commands
@@ -79,12 +107,16 @@ int main () {
             }
 
             // Close old stream
-            rc = pclose(commands[i].fd);
-            if (rc == -1) return 7;
+            if (fclose(commands[i].fd) == -1) {
+                printf("overlord: %s\n", strerror(errno));
+                return 7;
+            }
 
             // Restart command
-            commands[i].fd = popen(commands[i].line, "r");
-            if (commands[i].fd == NULL) return 8;
+            if (run_command(&commands[i]) == -1) {
+                printf("overlord: %s\n", strerror(errno));
+                return 8;
+            }
         }
     }
 
