@@ -18,6 +18,9 @@ size_t      linecap             = 0;
 ssize_t     linelen             = 0;
 int         shutdown_pending    = 0;
 
+// run_command is similar to popen except that it calls setpgrp before execl
+// ands sets the pid of cmd.
+// Returns 0 on success and -1 on failure and errno is set.
 int run_command(Command *cmd) {
     FILE *fd;
     int filedes[2], pid;
@@ -44,6 +47,11 @@ int run_command(Command *cmd) {
     return 0;
 }
 
+// If signal is SIGTERM, SIGTERM will be sent to all child processes and
+// overlord will exit after all children is terminated.
+// If signal is SIGINT, the first signal does the same action as SIGTERM.
+// If another SIGINT is received while waiting for termination of
+// child processes, a SIGKILL will be sent to child processes.
 void sig_handler(int signo) {
     printf("overlord: received signal: %s\n", strsignal(signo));
     switch (signo) {
