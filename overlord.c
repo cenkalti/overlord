@@ -3,6 +3,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <signal.h>
 
 typedef struct {
     char *line;
@@ -10,11 +11,12 @@ typedef struct {
     FILE *fd;
 } Command;
 
-int     n           = 0;
-Command *commands   = NULL;
-char    *line       = NULL;
-size_t  linecap     = 0;
-ssize_t linelen     = 0;
+int         n                   = 0;
+Command     *commands           = NULL;
+char        *line               = NULL;
+size_t      linecap             = 0;
+ssize_t     linelen             = 0;
+int         shutdown_pending    = 0;
 
 int run_command(Command *cmd) {
     FILE *fd;
@@ -26,6 +28,7 @@ int run_command(Command *cmd) {
     case -1:
         return -1;
     case 0: // Child
+        setpgrp();
         dup2(filedes[1], STDOUT_FILENO);
         close(filedes[1]);
         close(filedes[0]);
@@ -41,7 +44,40 @@ int run_command(Command *cmd) {
     return 0;
 }
 
+void sig_handler(int signo) {
+    printf("overlord: received signal: %s\n", strsignal(signo));
+    switch (signo) {
+    case SIGINT:
+        if (shutdown_pending) {
+            for (int i = 0; i < n; ++i) {
+                pid_t pgid = getpgid(commands[i].pid);
+                printf("overlord: sending SIGKILL to PGID: %d\n", pgid);
+                killpg(pgid, SIGKILL);
+            }
+            return;
+        }
+        shutdown_pending = 1;
+    case SIGTERM:
+        for (int i = 0; i < n; ++i) {
+            printf("overlord: sending SIGTERM to PID: %d\n", commands[i].pid);
+            kill(commands[i].pid, SIGTERM);
+        }
+    }
+}
+
 int main() {
+    // Register signal handlers
+    struct sigaction act;
+    sigset_t block_mask;
+    sigemptyset(&block_mask);
+    sigaddset(&block_mask, SIGINT);
+    sigaddset(&block_mask, SIGTERM);
+    act.sa_handler = sig_handler;
+    act.sa_mask = block_mask;
+    act.sa_flags = 0;
+    sigaction(SIGINT,  &act, NULL);
+    sigaction(SIGTERM, &act, NULL);
+
     // Read lines
     while ((linelen = getline(&line, &linecap, stdin)) != -1) {
         // TODO Trim whitespace
@@ -78,21 +114,24 @@ int main() {
     }
 
     // Read output of commands
-    fd_set set;
+    fd_set read_fds, error_fds;
     while (n > 0) {
-        FD_ZERO (&set);
+        FD_ZERO(&read_fds);
         for (int i = 0; i < n; ++i) {
-            FD_SET (fileno(commands[i].fd), &set);
+            FD_SET(fileno(commands[i].fd), &read_fds);
         }
+        FD_COPY(&read_fds, &error_fds);
 
         // Wait for IO
-        int rc = select(FD_SETSIZE, &set, NULL, NULL, NULL);
+        int rc = select(FD_SETSIZE, &read_fds, NULL, &error_fds, NULL);
         if (rc == -1) {
+            if (errno == EINTR) continue;
             printf("overlord: %s\n", strerror(errno));
             return 5;
         }
 
-        for (int i = 0; i < n && FD_ISSET (fileno(commands[i].fd), &set); ++i) {
+        // Read lines from ready streams
+        for (int i = 0; i < n && FD_ISSET (fileno(commands[i].fd), &read_fds); ++i) {
             linelen = getline(&line, &linecap, commands[i].fd);
             if (linelen != -1) {
                 // Write output
@@ -102,6 +141,7 @@ int main() {
 
             // EOF, check for error
             if (errno != 0) {
+                if (errno == EINTR) continue;
                 printf("overlord: %s\n", strerror(errno));
                 return 6;
             }
@@ -110,6 +150,15 @@ int main() {
             if (fclose(commands[i].fd) == -1) {
                 printf("overlord: %s\n", strerror(errno));
                 return 7;
+            }
+        }
+
+        // Check errored streams
+        for (int i = 0; i < n && FD_ISSET (fileno(commands[i].fd), &read_fds); ++i) {
+            if (shutdown_pending) {
+                // Remove command from the list
+                commands[i] = commands[--n];
+                break;
             }
 
             // Restart command
