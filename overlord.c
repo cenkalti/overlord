@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <unistd.h>
 #include <errno.h>
 #include <signal.h>
@@ -154,6 +155,25 @@ void *print_output() {
     pthread_exit(NULL);
 }
 
+char *trim_whitespace(char *str) {
+    char *end;
+
+    // Trim leading space
+    while(isspace(*str)) str++;
+
+    if(*str == 0)  // All spaces?
+    return str;
+
+    // Trim trailing space
+    end = str + strlen(str) - 1;
+    while(end > str && isspace(*end)) end--;
+
+    // Write new null terminator
+    *(end+1) = 0;
+
+    return str;
+}
+
 int main() {
     pthread_mutex_init(&mutex, NULL);
     pthread_cond_init(&cond, NULL);
@@ -172,11 +192,12 @@ int main() {
 
     // Read lines
     while ((linelen = getline(&line, &linecap, stdin)) != -1) {
-        // TODO Trim whitespace
-        // TODO Ignore empty lines
+        // Ignore empty lines
+        char *trimmed = trim_whitespace(line);
+        if (strlen(trimmed) == 0) continue;
 
         // Ignore comments
-        if (*line == '#') continue;
+        if (*trimmed == '#') continue;
 
         commands = realloc(commands, sizeof(Command) * ++n);
         if (commands == NULL) {
@@ -190,7 +211,7 @@ int main() {
             return 2;
         }
 
-        strcpy(commands[n-1].line, line);
+        strcpy(commands[n-1].line, trimmed);
     }
     if (errno != 0) {
         printf("overlord: %s\n", strerror(errno));
