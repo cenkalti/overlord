@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <signal.h>
+#include <pthread.h>
 
 typedef struct {
     char *line;
@@ -11,40 +12,66 @@ typedef struct {
     FILE *fd;
 } Command;
 
-int         n                   = 0;
-Command     *commands           = NULL;
-char        *line               = NULL;
-size_t      linecap             = 0;
-ssize_t     linelen             = 0;
-int         shutdown_pending    = 0;
+// Number of commands in input
+int n = 0;
+
+// List of commands in input
+Command *commands = NULL;
+
+// Buffer for getline()
+char *line = NULL;
+size_t  linecap = 0;
+ssize_t linelen = 0;
+
+// Set when first SIGINT is received
+int shutdown_pending = 0;
+
+pthread_t output_thread;
+pthread_mutex_t mutex;
+pthread_cond_t cond;
+
+int _run_command(Command *cmd) {
+    int filedes[2];
+    if (pipe(filedes) == -1) return -1;
+
+    pid_t pid = fork();
+    if (pid == -1) {
+        // Error
+        close(filedes[0]);
+        close(filedes[1]);
+        return -1;
+    } else if (pid == 0) {
+        // Child
+        dup2(filedes[1], STDOUT_FILENO);
+        close(filedes[1]);
+        close(filedes[0]);
+        execl("/bin/sh", "sh", "-c", cmd->line, NULL);
+        _exit(127); // unreached because of execl
+    } else {
+        // Parent
+        FILE *fd = fdopen(filedes[0], "r");
+        close(filedes[1]);
+        cmd->pid = pid;
+        cmd->fd = fd;
+        return 0;
+    }
+}
 
 // run_command is similar to popen except that it calls setpgrp before execl
 // ands sets the pid of cmd.
 // Returns 0 on success and -1 on failure and errno is set.
 int run_command(Command *cmd) {
-    FILE *fd;
-    int filedes[2], pid;
+    // Block SIGINT and SIGTERM during _run_command()
+    sigset_t block_mask, previous;
+    sigemptyset(&block_mask);
+    sigemptyset(&previous);
+    sigaddset(&block_mask, SIGINT);
+    sigaddset(&block_mask, SIGTERM);
 
-    if (pipe(filedes) == -1) return -1;
-
-    switch (pid = fork()) {
-    case -1:
-        return -1;
-    case 0: // Child
-        setpgrp();
-        dup2(filedes[1], STDOUT_FILENO);
-        close(filedes[1]);
-        close(filedes[0]);
-        execl("/bin/sh", "sh", "-c", cmd->line, NULL);
-        _exit(127);
-    }
-
-    // Parent
-    fd = fdopen(filedes[0], "r");
-    close(filedes[1]);
-    cmd->pid = pid;
-    cmd->fd = fd;
-    return 0;
+    sigprocmask(SIG_BLOCK, &block_mask, &previous);
+    int rc = _run_command(cmd);
+    sigprocmask(SIG_SETMASK, &previous, NULL);
+    return rc;
 }
 
 // If signal is SIGTERM, SIGTERM will be sent to all child processes and
@@ -57,12 +84,8 @@ void sig_handler(int signo) {
     switch (signo) {
     case SIGINT:
         if (shutdown_pending) {
-            for (int i = 0; i < n; ++i) {
-                pid_t pgid = getpgid(commands[i].pid);
-                printf("overlord: sending SIGKILL to PGID: %d\n", pgid);
-                killpg(pgid, SIGKILL);
-            }
-            return;
+            killpg(getpgrp(), SIGKILL);
+            _exit(126); // unreached because of killpg
         }
         shutdown_pending = 1;
     case SIGTERM:
@@ -73,7 +96,60 @@ void sig_handler(int signo) {
     }
 }
 
+void *print_output() {
+    fd_set read_fds;
+    struct timeval timeout;
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 100000;
+
+    while (1) {
+        pthread_mutex_lock(&mutex);
+        if (n == 0) {
+            pthread_mutex_unlock(&mutex);
+            break;
+        }
+
+        FD_ZERO(&read_fds);
+        for (int i = 0; i < n; ++i) {
+            if (commands[i].fd == NULL) continue;
+            FD_SET(fileno(commands[i].fd), &read_fds);
+        }
+
+        // Wait for IO
+        if (select(FD_SETSIZE, &read_fds, NULL, NULL, &timeout) == -1) {
+            pthread_mutex_unlock(&mutex);
+            continue;
+        }
+
+        // Read lines from ready streams
+        for (int i = 0; i < n; ++i) {
+            FILE *f = commands[i].fd;
+            if (f == NULL) continue;
+            if (FD_ISSET(fileno(f), &read_fds)) {
+                linelen = getline(&line, &linecap, f);
+                if (linelen != -1) {
+                    // Write output
+                    fwrite(line, linelen, 1, stdout);
+                    continue;
+                }
+            }
+            if (feof(f) || ferror(f)) {
+                fclose(f);
+                commands[i].fd = NULL;
+                pthread_cond_signal(&cond);
+            }
+        }
+
+        pthread_mutex_unlock(&mutex);
+    }
+
+    pthread_exit(NULL);
+}
+
 int main() {
+    pthread_mutex_init(&mutex, NULL);
+    pthread_cond_init(&cond, NULL);
+
     // Register signal handlers
     struct sigaction act;
     sigset_t block_mask;
@@ -121,61 +197,46 @@ int main() {
         }
     }
 
-    // Read output of commands
-    fd_set read_fds, error_fds;
-    while (n > 0) {
-        FD_ZERO(&read_fds);
-        for (int i = 0; i < n; ++i) {
-            FD_SET(fileno(commands[i].fd), &read_fds);
-        }
-        FD_COPY(&read_fds, &error_fds);
+    // Start output read thread
+    if (pthread_create(&output_thread, NULL, print_output, NULL) != 0) {
+        return 5;
+    }
 
-        // Wait for IO
-        int rc = select(FD_SETSIZE, &read_fds, NULL, &error_fds, NULL);
-        if (rc == -1) {
+    pid_t pid;
+    int stat;
+    while (1) {
+        pid = wait(&stat);
+        if (pid == -1) {
+            if (errno == ECHILD) break;
             if (errno == EINTR) continue;
             printf("overlord: %s\n", strerror(errno));
-            return 5;
+            return 7;
         }
+        for (int i = 0; i < n; ++i) {
+            if (commands[i].pid == pid) {
+                pthread_mutex_lock(&mutex);
 
-        // Read lines from ready streams
-        for (int i = 0; i < n && FD_ISSET (fileno(commands[i].fd), &read_fds); ++i) {
-            linelen = getline(&line, &linecap, commands[i].fd);
-            if (linelen != -1) {
-                // Write output
-                fwrite(line, linelen, 1, stdout);
-                continue;
-            }
+                // Wait until all output is consumed by output thread
+                while (commands[i].fd) pthread_cond_wait(&cond, &mutex);
 
-            // EOF, check for error
-            if (errno != 0) {
-                if (errno == EINTR) continue;
-                printf("overlord: %s\n", strerror(errno));
-                return 6;
-            }
+                if (shutdown_pending) {
+                    // Remove command from the list
+                    commands[i] = commands[--n];
+                } else {
+                    // Restart command
+                    if (run_command(&commands[i]) == -1) {
+                        printf("overlord: %s\n", strerror(errno));
+                        return 6;
+                    }
+                }
 
-            // Close old stream
-            if (fclose(commands[i].fd) == -1) {
-                printf("overlord: %s\n", strerror(errno));
-                return 7;
-            }
-        }
-
-        // Check errored streams
-        for (int i = 0; i < n && FD_ISSET (fileno(commands[i].fd), &read_fds); ++i) {
-            if (shutdown_pending) {
-                // Remove command from the list
-                commands[i] = commands[--n];
+                pthread_mutex_unlock(&mutex);
                 break;
-            }
-
-            // Restart command
-            if (run_command(&commands[i]) == -1) {
-                printf("overlord: %s\n", strerror(errno));
-                return 8;
             }
         }
     }
 
+    // Wait threads to finish then exit
+    pthread_join(output_thread, NULL);
     return 0;
 }
