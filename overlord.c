@@ -85,7 +85,7 @@ void sig_handler(int signo) {
     case SIGINT:
         if (shutdown_pending) {
             killpg(getpgrp(), SIGKILL);
-            _exit(126); // unreached because of killpg
+            _exit(EXIT_SUCCESS);
         }
         shutdown_pending = 1;
     case SIGTERM:
