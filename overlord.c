@@ -26,7 +26,6 @@ ssize_t linelen = 0;
 // Set when first SIGINT is received
 int shutdown_pending = 0;
 
-pthread_t output_thread;
 pthread_mutex_t mutex;
 pthread_cond_t cond;
 
@@ -57,8 +56,7 @@ int _run_command(Command *cmd) {
     }
 }
 
-// run_command is similar to popen except that it calls setpgrp before execl
-// ands sets the pid of cmd.
+// run_command is similar to popen except that it sets the pid of cmd.
 // Returns 0 on success and -1 on failure and errno is set.
 int run_command(Command *cmd) {
     // Block SIGINT and SIGTERM during _run_command()
@@ -74,6 +72,20 @@ int run_command(Command *cmd) {
     return rc;
 }
 
+void warm_shutdown() {
+    for (int i = 0; i < n; ++i) {
+        printf("overlord: sending SIGTERM to PID: %d\n", commands[i].pid);
+        kill(commands[i].pid, SIGTERM);
+    }
+}
+
+void cold_shutdown() {
+    pid_t pgid = getpgrp();
+    printf("overlord: sending SIGKILL to PGID: %d\n", pgid);
+    killpg(pgid, SIGKILL);
+    _exit(EXIT_FAILURE); // never reached
+}
+
 // If signal is SIGTERM, SIGTERM will be sent to all child processes and
 // overlord will exit after all children is terminated.
 // If signal is SIGINT, the first signal does the same action as SIGTERM.
@@ -84,15 +96,11 @@ void sig_handler(int signo) {
     switch (signo) {
     case SIGINT:
         if (shutdown_pending) {
-            killpg(getpgrp(), SIGKILL);
-            _exit(EXIT_SUCCESS);
+            cold_shutdown();
         }
         shutdown_pending = 1;
     case SIGTERM:
-        for (int i = 0; i < n; ++i) {
-            printf("overlord: sending SIGTERM to PID: %d\n", commands[i].pid);
-            kill(commands[i].pid, SIGTERM);
-        }
+        warm_shutdown();
     }
 }
 
@@ -192,14 +200,16 @@ int main() {
     // Run commands
     for (int i = 0; i < n; ++i) {
         if (run_command(&commands[i]) == -1) {
-            printf("overlord: %s\n", strerror(errno));
-            return 4;
+            printf("overlord: cannot run command: %s\n", strerror(errno));
+            cold_shutdown();
         }
     }
 
     // Start output read thread
+    pthread_t output_thread;
     if (pthread_create(&output_thread, NULL, print_output, NULL) != 0) {
-        return 5;
+        printf("overlord: cannot create thread");
+        cold_shutdown();
     }
 
     pid_t pid;
@@ -209,8 +219,8 @@ int main() {
         if (pid == -1) {
             if (errno == ECHILD) break;
             if (errno == EINTR) continue;
-            printf("overlord: %s\n", strerror(errno));
-            return 7;
+            printf("overlord: wait error: %s\n", strerror(errno));
+            cold_shutdown();
         }
         for (int i = 0; i < n; ++i) {
             if (commands[i].pid == pid) {
@@ -225,8 +235,8 @@ int main() {
                 } else {
                     // Restart command
                     if (run_command(&commands[i]) == -1) {
-                        printf("overlord: %s\n", strerror(errno));
-                        return 6;
+                        printf("overlord: cannot restart command: %s\n", strerror(errno));
+                        cold_shutdown();
                     }
                 }
 
