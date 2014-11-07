@@ -9,7 +9,7 @@
 typedef struct {
     char *line;
     int  pid;
-    FILE *fd;
+    FILE *fp;
 } Command;
 
 // Number of commands in input
@@ -49,10 +49,10 @@ int _run_command(Command *cmd) {
         _exit(127); // unreached because of execl
     } else {
         // Parent
-        FILE *fd = fdopen(filedes[0], "r");
+        FILE *fp = fdopen(filedes[0], "r");
         close(filedes[1]);
         cmd->pid = pid;
-        cmd->fd = fd;
+        cmd->fp = fp;
         return 0;
     }
 }
@@ -111,8 +111,8 @@ void *print_output() {
 
         FD_ZERO(&read_fds);
         for (int i = 0; i < n; ++i) {
-            if (commands[i].fd == NULL) continue;
-            FD_SET(fileno(commands[i].fd), &read_fds);
+            if (commands[i].fp == NULL) continue;
+            FD_SET(fileno(commands[i].fp), &read_fds);
         }
 
         // Wait for IO
@@ -123,7 +123,7 @@ void *print_output() {
 
         // Read lines from ready streams
         for (int i = 0; i < n; ++i) {
-            FILE *f = commands[i].fd;
+            FILE *f = commands[i].fp;
             if (f == NULL) continue;
             if (FD_ISSET(fileno(f), &read_fds)) {
                 linelen = getline(&line, &linecap, f);
@@ -135,7 +135,7 @@ void *print_output() {
             }
             if (feof(f) || ferror(f)) {
                 fclose(f);
-                commands[i].fd = NULL;
+                commands[i].fp = NULL;
                 pthread_cond_signal(&cond);
             }
         }
@@ -217,7 +217,7 @@ int main() {
                 pthread_mutex_lock(&mutex);
 
                 // Wait until all output is consumed by output thread
-                while (commands[i].fd) pthread_cond_wait(&cond, &mutex);
+                while (commands[i].fp) pthread_cond_wait(&cond, &mutex);
 
                 if (shutdown_pending) {
                     // Remove command from the list
