@@ -35,6 +35,8 @@ pthread_mutex_t mutex;
 
 sigset_t block_mask;
 
+// _run_command is similar to popen function except that it sets the PID of cmd.
+// Returns 0 on success and -1 on failure and errno is set.
 int _run_command(Command *cmd) {
     int filedes[2];
     if (pipe(filedes) == -1) return -1;
@@ -63,8 +65,8 @@ int _run_command(Command *cmd) {
     }
 }
 
-// run_command is similar to popen except that it sets the pid of cmd.
-// Returns 0 on success and -1 on failure and errno is set.
+// We need to block signals during the execution of _run_command
+// because our implementation is AS-Unsafe.
 int run_command(Command *cmd) {
     // Block signals during _run_command()
     sigset_t previous;
@@ -74,9 +76,10 @@ int run_command(Command *cmd) {
     return rc;
 }
 
+// send_signal sends signal to all running commands.
 void send_signal(int signo) {
     for (int i = 0; i < n; ++i) {
-        if (commands[i].pid) {
+        if (commands[i].pid) { // do not send to zero PID
             // fprintf(stderr, "overlord: sending signal: %s to PID: %d\n", strsignal(signo), pid);
             kill(commands[i].pid, signo);
         }
@@ -135,14 +138,16 @@ void *watch_command(void *ptr) {
 
         pthread_mutex_unlock(&mutex);
 
+        // Consume stream
         char *line = NULL;
         ssize_t linelen;
         size_t  linecap = 0;
         while ((linelen = getline(&line, &linecap, cmd->fp)) > 0)
-            fwrite(line, linelen, 1, stdout);
+            fwrite(line, linelen, 1, stdout); // fwrite is MT-Safe
 
         fclose(cmd->fp);
 
+        // Wait for child process to exit
         int pstat;
         pid_t pid;
         do {
@@ -173,7 +178,7 @@ char *trim_whitespace(char *str) {
 }
 
 int main() {
-    // Read lines
+    // Read lines from stdin
     char *line = NULL;
     ssize_t linelen;
     size_t  linecap = 0;
