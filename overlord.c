@@ -223,12 +223,12 @@ int main() {
     // Run commands
     for (int i = 0; i < n; ++i) {
         if (pthread_create(&commands[i].thread, NULL, watch_command, (void*)&commands[i]) != 0) {
-            printf("overlord: cannot create thread");
+            fprintf(stderr, "overlord: cannot create thread");
             pthread_mutex_lock(&mutex);
             send_signal(SIGKILL);
             stop = true;
             pthread_mutex_unlock(&mutex);
-            break;
+            return 3;
         }
     }
 
