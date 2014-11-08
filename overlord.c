@@ -1,6 +1,3 @@
-// TODO check error handling
-// TODO check error messages
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -129,7 +126,7 @@ void *watch_command(void *ptr) {
         }
 
         if (run_command(cmd) == -1) {
-            printf("overlord: cannot run command: %s\n", strerror(errno));
+            fprintf(stderr, "overlord: cannot run command: %s\n", strerror(errno));
             cmd->pid = 0;
             pthread_mutex_unlock(&mutex);
             sleep(1);
@@ -192,14 +189,14 @@ int main() {
 
         commands = realloc(commands, sizeof(Command) * ++n);
         if (commands == NULL) {
-            printf("overlord: %s\n", strerror(errno));
+            fprintf(stderr, "overlord: %s\n", strerror(errno));
             return 1;
         }
 
         commands[n-1].pid = 0;
         commands[n-1].line = malloc(strlen(trimmed)+1);
         if (commands[n-1].line == NULL) {
-            printf("overlord: %s\n", strerror(errno));
+            fprintf(stderr, "overlord: %s\n", strerror(errno));
             return 2;
         }
 
