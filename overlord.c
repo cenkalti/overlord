@@ -78,7 +78,7 @@ void send_signal(int signo) {
     for (int i = 0; i < n; ++i) {
         if (commands[i].pid) { // do not send to zero PID
             // fprintf(stderr, "overlord: sending signal: %s to PID: %d\n", strsignal(signo), pid);
-            kill(commands[i].pid, signo);
+            kill(-commands[i].pid, signo);
         }
     }
 }
