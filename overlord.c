@@ -7,6 +7,7 @@
 #include <signal.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <sys/wait.h>
 
 typedef struct {
     char        *line;
